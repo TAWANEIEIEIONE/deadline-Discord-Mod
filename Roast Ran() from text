@@ -1,0 +1,117 @@
+import os
+import json
+import random
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+ROAST_FILE = "roast_list.json"
+
+# ----------------------------------------------------
+# 1. ระบบโหลดและบันทึกไฟล์ JSON
+# ----------------------------------------------------
+def load_roasts() -> list:
+    if os.path.exists(ROAST_FILE):
+        try:
+            with open(ROAST_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return ["มัวแต่พิมพ์เล่นอยู่ได้ งานการไม่ทำหรือไง! ⏳", "หยุดแชทแล้วกลับไปเปิดไฟล์งานเดี๋ยวนี้! 🚨"]
+
+def save_roasts(roast_list: list):
+    with open(ROAST_FILE, "w", encoding="utf-8") as f:
+        json.dump(roast_list, f, ensure_ascii=False, indent=4)
+
+roast_words = load_roasts()
+
+# ----------------------------------------------------
+# 2. Event สำหรับดักจับแชทแล้วสุ่มคำด่าตอบกลับ
+# ----------------------------------------------------
+# 💡 หมายเหตุ: ถ้านำไปใส่รวมใน bot.py เดิม ให้เอาเฉพาะเนื้อหาข้างในไปใส่ใน @bot.event on_message
+async def handle_roast_on_message(bot: commands.Bot, message: discord.Message):
+    if message.author.bot:
+        return
+
+    # ตอบกลับเมื่อโดนแท็ก (@บอท) หรือมีโอกาส 30% ในการสุ่มตอบข้อความทั่วไป
+    if bot.user.mentioned_in(message) or random.random() < 0.3:
+        if roast_words:
+            random_roast = random.choice(roast_words)
+            await message.reply(f"{message.author.mention} {random_roast}")
+
+# ----------------------------------------------------
+# 3. Slash Commands สำหรับจัดการคลังคำด่า (CRUD)
+# ----------------------------------------------------
+def setup_roast_commands(bot: commands.Bot):
+
+    @bot.tree.command(name="add_roast", description="เพิ่มคำด่าใหม่เข้าคลัง (ใช้ / แยกหลายคำได้ เช่น ไก่/สาว)")
+    @app_commands.describe(text="พิมพ์คำหรือประโยคที่ต้องการเพิ่ม (ใช้ / แยกคำได้หลายคำ)")
+    async def add_roast(interaction: discord.Interaction, text: str):
+        new_items = [item.strip() for item in text.split('/') if item.strip()]
+        
+        if not new_items:
+            await interaction.response.send_message("❌ **กรุณากรอกข้อความอย่างน้อย 1 คำ!**", ephemeral=True)
+            return
+
+        added_count = 0
+        for item in new_items:
+            if item not in roast_words:
+                roast_words.append(item)
+                added_count += 1
+                
+        save_roasts(roast_words)
+        
+        formatted_list = "\n".join([f"• `{item}`" for item in new_items])
+        await interaction.response.send_message(
+            f"✅ **บันทึกสำเร็จ {added_count} รายการ!**\n{formatted_list}", 
+            ephemeral=True
+        )
+
+    @bot.tree.command(name="list_roast", description="ดูรายการคำด่าทั้งหมดที่มีในคลัง")
+    async def list_roast(interaction: discord.Interaction):
+        if not roast_words:
+            await interaction.response.send_message("❌ **ขณะนี้คลังคำด่ายังว่างเปล่า!**", ephemeral=True)
+            return
+
+        formatted_list = "\n".join([f"**{i+1}.** {word}" for i, word in enumerate(roast_words)])
+        
+        if len(formatted_list) > 3900:
+            formatted_list = formatted_list[:3900] + "\n... (รายการยาวเกินไป)"
+
+        embed = discord.Embed(
+            title=f"🔥 คลังคำด่าทั้งหมด ({len(roast_words)} รายการ)",
+            description=formatted_list,
+            color=discord.Color.gold()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="edit_roast", description="แก้ไขคำด่าตามลำดับเลข (อ้างอิงจาก /list_roast)")
+    @app_commands.describe(index="ลำดับเลขข้อความที่ต้องการแก้ไข", new_text="ข้อความใหม่ที่จะนำไปเขียนทับ")
+    async def edit_roast(interaction: discord.Interaction, index: int, new_text: str):
+        if index < 1 or index > len(roast_words):
+            await interaction.response.send_message(f"❌ **ไม่พบลำดับที่ {index}!**", ephemeral=True)
+            return
+
+        old_text = roast_words[index - 1]
+        roast_words[index - 1] = new_text.strip()
+        save_roasts(roast_words)
+
+        await interaction.response.send_message(
+            f"✏️ **แก้ไขเรียบร้อย!**\n• ลำดับที่ {index}: จากเดิม `{old_text}`\n• เปลี่ยนเป็น: `{new_text.strip()}`", 
+            ephemeral=True
+        )
+
+    @bot.tree.command(name="delete_roast", description="ลบคำด่าออกจากคลังตามลำดับเลข (อ้างอิงจาก /list_roast)")
+    @app_commands.describe(index="ลำดับเลขข้อความที่ต้องการลบ")
+    async def delete_roast(interaction: discord.Interaction, index: int):
+        if index < 1 or index > len(roast_words):
+            await interaction.response.send_message(f"❌ **ไม่พบลำดับที่ {index}!**", ephemeral=True)
+            return
+
+        removed_text = roast_words.pop(index - 1)
+        save_roasts(roast_words)
+
+        await interaction.response.send_message(
+            f"🗑️ **ลบสำเร็จ!** ลบรายการลำดับที่ {index}: `{removed_text}` ออกจากคลังแล้ว", 
+            ephemeral=True
+        )
