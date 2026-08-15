@@ -458,4 +458,4 @@ async def on_ready():
     if not reminder_loop.is_running():
         reminder_loop.start()
 
-bot.run('MTUzNTU5MDQyODAwMTMxMjg5OQ.GCCKOR.mWKmBE_a67bKNzZttb1Aldor7imUKwtgHJ8qdU')
+bot.run('Discord Token')                             //Pit your DISCORD TOKEN HERE 
