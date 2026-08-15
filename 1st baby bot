@@ -1,0 +1,473 @@
+import os
+import io
+import random
+from datetime import datetime, timedelta
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+from PIL import Image, ImageDraw, ImageFont
+
+# ----------------------------------------------------
+# การตั้งค่าเบื้องต้น
+# ----------------------------------------------------
+GUILD_ID = discord.Object(id=1128309281427562516) # Server ID ของคุณ
+ALBUM_DIR = "album"
+os.makedirs(ALBUM_DIR, exist_ok=True)
+
+active_tasks = {}
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+class NotificationBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix='!', intents=intents)
+
+    async def setup_hook(self):
+        self.tree.copy_global_to(guild=GUILD_ID)
+        await self.tree.sync(guild=GUILD_ID)
+        print(f"✅ Sync Slash Commands เข้า Guild ID: {GUILD_ID.id} เรียบร้อยแล้ว!")
+
+bot = NotificationBot()
+
+# ----------------------------------------------------
+# ฟังก์ชันสร้างรูปภาพ Countdown
+# ----------------------------------------------------
+def generate_countdown_image(image_path: str, remaining_time_str: str) -> io.BytesIO:
+    image = Image.open(image_path).convert("RGB")
+    draw = ImageDraw.Draw(image)
+
+    try:
+        font = ImageFont.truetype("arial.ttf", size=int(image.height * 0.08))
+    except IOError:
+        font = ImageFont.load_default()
+
+    text = f"Deadline in:\n{remaining_time_str}"
+    w, h = image.width, image.height
+    text_position = (int(w * 0.05), int(h * 0.70))
+
+    shadow_offset = 3
+    draw.text((text_position[0] + shadow_offset, text_position[1] + shadow_offset), text, fill="black", font=font)
+    draw.text(text_position, text, fill="yellow", font=font)
+
+    img_byte_arr = io.BytesIO()
+    image.save(img_byte_arr, format='JPEG')
+    img_byte_arr.seek(0)
+    return img_byte_arr
+
+# ----------------------------------------------------
+# GUI จัดการอัลบั้มรูปภาพ (เปลี่ยนชื่อ / ลบรูป)
+# ----------------------------------------------------
+class RenameImageModal(discord.ui.Modal):
+    def __init__(self, old_filename: str):
+        super().__init__(title=f'✏️ เปลี่ยนชื่อรูปภาพ')
+        self.old_filename = old_filename
+
+        name_only, ext = os.path.splitext(old_filename)
+        self.new_name_input = discord.ui.TextInput(
+            label='ชื่อไฟล์ใหม่ (ไม่ต้องใส่ นามสกุล .jpg/.png)',
+            placeholder='เช่น meme_cat_1',
+            default=name_only,
+            required=True
+        )
+        self.add_item(self.new_name_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        _, ext = os.path.splitext(self.old_filename)
+        new_name = self.new_name_input.value.strip() + ext
+        
+        old_path = os.path.join(ALBUM_DIR, self.old_filename)
+        new_path = os.path.join(ALBUM_DIR, new_name)
+
+        if os.path.exists(new_path) and old_path != new_path:
+            await interaction.response.send_message("❌ **มีชื่อไฟล์นี้อยู่ในอัลบั้มแล้ว!** กรุณาใช้ชื่ออื่น", ephemeral=True)
+            return
+
+        if os.path.exists(old_path):
+            os.rename(old_path, new_path)
+            await interaction.response.send_message(f"✅ เปลี่ยนชื่อรูปภาพจาก `{self.old_filename}` เป็น `{new_name}` เรียบร้อยแล้ว!", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ **ไม่พบไฟล์รูปภาพดังกล่าว**", ephemeral=True)
+
+class ManageAlbumView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.update_select_menu()
+
+    def update_select_menu(self):
+        self.clear_items()
+        images = [f for f in os.listdir(ALBUM_DIR) if f.lower().endswith(('png', 'jpg', 'jpeg', 'webp'))]
+        
+        if images:
+            options = [discord.SelectOption(label=f"🖼️ {img}", value=img) for img in images[:25]]
+            select = discord.ui.Select(
+                placeholder="คลิกเลือกรูปภาพที่ต้องการจัดการ...",
+                min_values=1,
+                max_values=1,
+                options=options,
+                custom_id="select_image_to_manage"
+            )
+            select.callback = self.select_callback
+            self.add_item(select)
+
+    async def select_callback(self, interaction: discord.Interaction):
+        selected_img = interaction.data['values'][0]
+        sub_view = SingleImageActionView(selected_img)
+        img_path = os.path.join(ALBUM_DIR, selected_img)
+        
+        file = discord.File(img_path, filename=selected_img)
+        await interaction.response.send_message(
+            content=f"📌 **คุณกำลังจัดการรูปภาพ:** `{selected_img}`\nกรุณาเลือกคำสั่งที่ต้องการทำ:",
+            file=file,
+            view=sub_view,
+            ephemeral=True
+        )
+
+class SingleImageActionView(discord.ui.View):
+    def __init__(self, filename: str):
+        super().__init__(timeout=60)
+        self.filename = filename
+
+    @discord.ui.button(label="✏️ เปลี่ยนชื่อรูปภาพ", style=discord.ButtonStyle.primary)
+    async def rename_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RenameImageModal(old_filename=self.filename))
+
+    @discord.ui.button(label="🗑️ ลบรูปภาพนี้", style=discord.ButtonStyle.danger)
+    async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        file_path = os.path.join(ALBUM_DIR, self.filename)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            await interaction.response.send_message(f"🗑️ ลบรูปภาพ `{self.filename}` ออกจากอัลบั้มเรียบร้อยแล้ว!", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ **ไม่พบไฟล์รูปภาพดังกล่าว**", ephemeral=True)
+
+# ----------------------------------------------------
+# Modal สำหรับตั้งค่างานด้วยตนเอง
+# ----------------------------------------------------
+class CustomTaskModal(discord.ui.Modal):
+    def __init__(self, selected_image: str):
+        super().__init__(title='📌 กำหนดวันเวลาด้วยตัวเอง')
+        self.selected_image = selected_image
+
+        self.date_input = discord.ui.TextInput(
+            label='1. วันที่ส่งงาน (ปี-เดือน-วัน)',
+            placeholder='เช่น 2026-08-15',
+            default=datetime.now().strftime("%Y-%m-%d"),
+            required=True
+        )
+        self.time_input = discord.ui.TextInput(
+            label='2. เวลาส่งงาน (ชั่วโมง:นาที)',
+            placeholder='เช่น 21:40 หรือ 18:00',
+            default='18:00',
+            required=True
+        )
+        self.interval_hours = discord.ui.TextInput(
+            label='3. แจ้งเตือนทุกๆ กี่ชั่วโมง',
+            placeholder='1',
+            default='1',
+            required=True
+        )
+
+        self.add_item(self.date_input)
+        self.add_item(self.time_input)
+        self.add_item(self.interval_hours)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw_date = self.date_input.value.strip().split()[0]
+        raw_time = self.time_input.value.strip().replace('.', ':')
+
+        full_datetime_str = f"{raw_date} {raw_time}"
+
+        try:
+            deadline = datetime.strptime(full_datetime_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ **รูปแบบวันหรือเวลาไม่ถูกต้อง!**\n- ช่องวันที่: `2026-08-09`\n- ช่องเวลา: `21:40`", 
+                ephemeral=True
+            )
+            return
+
+        try:
+            h = int(self.interval_hours.value)
+        except ValueError:
+            await interaction.response.send_message("❌ **กรุณากรอกตัวเลขชั่วโมงเป็นตัวเลขเท่านั้น**", ephemeral=True)
+            return
+
+        active_tasks[interaction.channel_id] = {
+            'deadline': deadline,
+            'interval_minutes': h * 60,
+            'selected_image': self.selected_image,
+            'last_notified': datetime.now() - timedelta(minutes=h * 60)
+        }
+
+        embed = discord.Embed(title="🚀 ตั้งการแจ้งเตือนงานสำเร็จ!", color=discord.Color.brand_green())
+        embed.add_field(name="📅 วันเวลาส่งงาน", value=f"`{deadline.strftime('%Y-%m-%d %H:%M')}`", inline=False)
+        embed.add_field(name="⏱️ แจ้งเตือนทุกๆ", value=f"`{h} ชั่วโมง`", inline=True)
+        embed.add_field(name="🖼️ รูปภาพที่ใช้", value=f"`{self.selected_image}`", inline=True)
+
+        await interaction.response.send_message(embed=embed)
+
+# ----------------------------------------------------
+# ปุ่มลัดเลือกวันเวลา (Quick Buttons)
+# ----------------------------------------------------
+class QuickDateButtonsView(discord.ui.View):
+    def __init__(self, selected_image: str):
+        super().__init__(timeout=60)
+        self.selected_image = selected_image
+
+    async def save_task(self, interaction: discord.Interaction, deadline: datetime, interval_hours: int = 1):
+        active_tasks[interaction.channel_id] = {
+            'deadline': deadline,
+            'interval_minutes': interval_hours * 60,
+            'selected_image': self.selected_image,
+            'last_notified': datetime.now() - timedelta(minutes=interval_hours * 60)
+        }
+
+        embed = discord.Embed(title="🚀 ตั้งการแจ้งเตือนงานสำเร็จ!", color=discord.Color.brand_green())
+        embed.add_field(name="📅 วันเวลาส่งงาน", value=f"`{deadline.strftime('%Y-%m-%d %H:%M')}`", inline=False)
+        embed.add_field(name="⏱️ แจ้งเตือนทุกๆ", value=f"`{interval_hours} ชั่วโมง`", inline=True)
+        embed.add_field(name="🖼️ รูปภาพที่ใช้", value=f"`{self.selected_image}`", inline=True)
+
+        await interaction.response.send_message(embed=embed)
+
+    @discord.ui.button(label="วันนี้ 18:00 น.", style=discord.ButtonStyle.primary, emoji="🌆")
+    async def today_evening(self, interaction: discord.Interaction, button: discord.ui.Button):
+        now = datetime.now()
+        deadline = now.replace(hour=18, minute=0, second=0, microsecond=0)
+        if deadline < now:
+            deadline += timedelta(days=1)
+        await self.save_task(interaction, deadline)
+
+    @discord.ui.button(label="พรุ่งนี้ 18:00 น.", style=discord.ButtonStyle.success, emoji="☀️")
+    async def tomorrow_evening(self, interaction: discord.Interaction, button: discord.ui.Button):
+        deadline = (datetime.now() + timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
+        await self.save_task(interaction, deadline)
+
+    @discord.ui.button(label="อีก 3 วันข้างหน้า", style=discord.ButtonStyle.secondary, emoji="📅")
+    async def in_3_days(self, interaction: discord.Interaction, button: discord.ui.Button):
+        deadline = (datetime.now() + timedelta(days=3)).replace(hour=18, minute=0, second=0, microsecond=0)
+        await self.save_task(interaction, deadline)
+
+    @discord.ui.button(label="อีก 7 วันข้างหน้า", style=discord.ButtonStyle.secondary, emoji="📆")
+    async def in_7_days(self, interaction: discord.Interaction, button: discord.ui.Button):
+        deadline = (datetime.now() + timedelta(days=7)).replace(hour=18, minute=0, second=0, microsecond=0)
+        await self.save_task(interaction, deadline)
+
+    @discord.ui.button(label="⚙️ กำหนดวัน/เวลาเอง", style=discord.ButtonStyle.danger)
+    async def custom_date(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CustomTaskModal(selected_image=self.selected_image))
+
+# ----------------------------------------------------
+# Dropdown เลือกรูปภาพ
+# ----------------------------------------------------
+class ImageSelectView(discord.ui.View):
+    def __init__(self, images_list):
+        super().__init__(timeout=60)
+        
+        options = [
+            discord.SelectOption(label="🎲 สุ่มรูปภาพจากอัลบั้ม (Random)", value="random", description="ให้บอทสุ่มเลือกรูปภาพเองทุกครั้ง")
+        ]
+        
+        for img in images_list[:24]:
+            options.append(discord.SelectOption(label=f"🖼️ {img}", value=img))
+
+        select = discord.ui.Select(
+            placeholder="🖼️ เลือกรูปภาพที่ต้องการใช้...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+        select.callback = self.select_callback
+        self.add_item(select)
+
+    async def select_callback(self, interaction: discord.Interaction):
+        chosen_image = interaction.data['values'][0]
+        buttons_view = QuickDateButtonsView(selected_image=chosen_image)
+        await interaction.response.send_message("⚡ **เลือกกำหนดส่งงานด่วน (คลิกที่ปุ่มได้เลย):**", view=buttons_view, ephemeral=True)
+
+# ----------------------------------------------------
+# Slash Commands
+# ----------------------------------------------------
+
+# คำสั่ง /help (สามารถแก้ไขข้อความตรงนี้ได้เองตามใจชอบ)
+@bot.tree.command(name="help", description="แสดงคำแนะนำการใช้งานและรายการคำสั่งทั้งหมด")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📖 คู่มือการใช้งานบอทแจ้งเตือน Deadline Manager",
+        description="ยินดีต้อนรับ! คุณสามารถใช้คำสั่งต่อไปนี้เพื่อจัดการงานและรูปภาพในระบบได้:",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(
+        name="📌 `/task`", 
+        value="ตั้งค่าการแจ้งเตือนงานใหม่ สามารถเลือกระบุรูปภาพ วันที่ และเวลาที่ต้องการส่งงานผ่านปุ่มลัดได้ทันที", 
+        inline=False
+    )
+    embed.add_field(
+        name="📤 `/add_photo`", 
+        value="แนบไฟล์รูปภาพเพื่ออัปโหลดเก็บไว้ในอัลบั้มสำหรับนำไปใช้แจ้งเตือน", 
+        inline=False
+    )
+    embed.add_field(
+        name="🖼️ `/manage_album`", 
+        value="เปิดเมนู GUI เพื่อดูรูปภาพในอัลบั้ม เปลี่ยนชื่อไฟล์รูปภาพ หรือลบรูปภาพที่ไม่ต้องการออก", 
+        inline=False
+    )
+    embed.add_field(
+        name="❓ `/help`", 
+        value="แสดงเมนูช่วยเหลือและรายละเอียดคำสั่งทั้งหมดนี้", 
+        inline=False
+    )
+    
+    embed.set_footer(text="Deadline Manager Bot • พัฒนาด้วย discord.py")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="add_photo", description="อัปโหลดรูปภาพใหม่เข้าอัลบั้ม")
+@app_commands.describe(photo="เลือกไฟล์รูปภาพที่ต้องการเพิ่มเข้าอัลบั้ม")
+async def add_photo_slash(interaction: discord.Interaction, photo: discord.Attachment):
+    await interaction.response.defer(ephemeral=True)
+
+    if not photo.content_type or not photo.content_type.startswith('image/'):
+        await interaction.followup.send("❌ **กรุณาแนบไฟล์ประเภทรูปภาพเท่านั้น!**", ephemeral=True)
+        return
+
+    save_path = os.path.join(ALBUM_DIR, photo.filename)
+    await photo.save(save_path)
+    await interaction.followup.send(f"✅ บันทึกรูปภาพ `{photo.filename}` เข้าอัลบั้มเรียบร้อยแล้ว!", ephemeral=True)
+
+@bot.tree.command(name="manage_album", description="ระบบ GUI จัดการรูปภาพในอัลบั้ม (ดู/เปลี่ยนชื่อ/ลบรูป)")
+async def manage_album_command(interaction: discord.Interaction):
+    images = [f for f in os.listdir(ALBUM_DIR) if f.lower().endswith(('png', 'jpg', 'jpeg', 'webp'))]
+    
+    if not images:
+        await interaction.response.send_message("❌ **อัลบั้มยังไม่มีรูปภาพ** สามารถใช้คำสั่ง `/add_photo` เพื่อเพิ่มรูปภาพได้ครับ", ephemeral=True)
+        return
+
+    view = ManageAlbumView()
+    await interaction.response.send_message("🖼️ **ระบบจัดการอัลบั้มรูปภาพ:** เลือกรูปภาพจากรายการด้านล่างเพื่อเปลี่ยนชื่อหรือลบ:", view=view, ephemeral=True)
+
+@bot.tree.command(name="task", description="ตั้งค่าการแจ้งเตือนงาน")
+async def task_command(interaction: discord.Interaction):
+    valid_images = [f for f in os.listdir(ALBUM_DIR) if f.lower().endswith(('png', 'jpg', 'jpeg', 'webp'))]
+    
+    if not valid_images:
+        await interaction.response.send_message("❌ **อัลบั้มยังไม่มีรูปภาพ** กรุณาใช้คำสั่ง `/add_photo` เพิ่มรูปก่อนครับ", ephemeral=True)
+        return
+
+    view = ImageSelectView(valid_images)
+    await interaction.response.send_message("👇 **ขั้นตอนที่ 1:** เลือกรูปภาพสำหรับงานนี้:", view=view, ephemeral=True)
+
+# ----------------------------------------------------
+# Loop & Run
+# ----------------------------------------------------
+@tasks.loop(minutes=1)
+async def reminder_loop():
+    now = datetime.now()
+    for channel_id, task in list(active_tasks.items()):
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            continue
+
+        deadline = task['deadline']
+        last_notified = task['last_notified']
+        interval_minutes = task['interval_minutes']
+
+        if now >= last_notified + timedelta(minutes=interval_minutes):
+            time_left = deadline - now
+
+            if time_left.total_seconds() <= 0:
+                embed = discord.Embed(
+                    title="🚨 หมดเวลาส่งงานแล้ว! (DEADLINE REACHED)", 
+                    description="งานในช่องนี้ถึงกำหนดส่งเรียบร้อยแล้ว", 
+                    color=discord.Color.red()
+                )
+                await channel.send(embed=embed)
+                del active_tasks[channel_id]
+                continue
+
+            if task['selected_image'] == "random":
+                images = [f for f in os.listdir(ALBUM_DIR) if f.lower().endswith(('png', 'jpg', 'jpeg', 'webp'))]
+                if not images:
+                    continue
+                chosen_image_path = os.path.join(ALBUM_DIR, random.choice(images))
+            else:
+                chosen_image_path = os.path.join(ALBUM_DIR, task['selected_image'])
+
+            days_left = time_left.days
+            hours_left, remainder = divmod(time_left.seconds, 3600)
+            minutes_left, _ = divmod(remainder, 60)
+            countdown_str = f"{days_left}d {hours_left}h {minutes_left}m"
+
+            img_bytes = generate_countdown_image(chosen_image_path, countdown_str)
+            file = discord.File(fp=img_bytes, filename="countdown.jpg")
+
+            await channel.send(
+                content=f"🔔 **แจ้งเตือนงาน!** เหลือเวลาอีกประมาณ `{days_left} วัน {hours_left} ชั่วโมง {minutes_left} นาที`", 
+                file=file
+            )
+
+            task['last_notified'] = now
+
+@bot.event
+async def on_ready():
+    print(f'🤖 บอท {bot.user} ล็อกอินสำเร็จแล้ว!')
+    if not reminder_loop.is_running():
+        reminder_loop.start()
+
+bot.run('TOKEN')
+
+
+
+
+import os
+import random
+import discord
+from discord.ext import commands
+from google import genai
+
+# ----------------------------------------------------
+# ตั้งค่า Gemini API
+# ----------------------------------------------------
+# นำ API Key ที่ได้จาก Google AI Studio มาวางตรงนี้
+GEMINI_API_KEY = "API KEYS"
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
+
+async def generate_ai_roast(user_message: str, author_name: str) -> str:
+    """ฟังก์ชันส่งข้อความไปให้ AI ช่วยคิดคำแซวกวนๆ"""
+    prompt = f"""
+    คุณเป็นบอทดิสคอร์ดสไตล์กวนประสาท ประชดประชันแบบขำๆ (Roast) 
+    ผู้ใช้ชื่อ "{author_name}" พิมพ์ข้อความว่า: "{user_message}"
+    
+    ช่วยคิดคำตอบกลับแบบกวนๆ ตลกๆ หรือแซวให้เขาไปทำงาน/เร่งงาน 1 สั้นๆ (ไม่เกิน 2-3 ประโยค)
+    ห้ามใช้คำหยาบคายรุนแรง ให้เน้นความประชดกวนๆ ฮาๆ และใช้วาจาไม่ซ้ำใคร
+    """
+    try:
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
+        # สำรองกรณี API มีปัญหา
+        return "รีบไปปั่นงานได้แล้ว มัวแต่พิมพ์เล่นอยู่ได้! ⏳"
+
+# ----------------------------------------------------
+# Event ตอบกลับข้อความในแชทด้วย AI
+# ----------------------------------------------------
+@bot.event
+async def on_message(message: discord.Message):
+    # ป้องกันไม่ให้บอทตอบตัวเอง หรือตอบบอทตัวอื่น
+    if message.author.bot:
+        return
+
+    # สุ่มโอกาส 30% ที่จะตอบกลับด้วย AI (หรือตั้งเป็น 1.0 ถ้าอยากให้ตอบทุกข้อความ)
+    if random.random() < 0.3:
+        async with message.channel.typing():
+            # ดึงคำตอบจาก AI
+            roast_text = await generate_ai_roast(message.content, message.author.display_name)
+            await message.reply(f"{message.author.mention} {roast_text}")
+
+    # สำคัญ! ต้องมีบรรทัดนี้เพื่อให้ Slash Commands (/help, /task) ยังทำงานได้
+    await bot.process_commands(message)
