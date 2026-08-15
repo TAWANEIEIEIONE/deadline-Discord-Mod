@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from PIL import Image, ImageDraw, ImageFont
+from google import genai
 
 # ----------------------------------------------------
 # การตั้งค่าเบื้องต้น
@@ -13,6 +14,10 @@ from PIL import Image, ImageDraw, ImageFont
 GUILD_ID = discord.Object(id=1128309281427562516) # Server ID ของคุณ
 ALBUM_DIR = "album"
 os.makedirs(ALBUM_DIR, exist_ok=True)
+
+# 🔑 ตั้งค่า Gemini API
+GEMINI_API_KEY = "API KEYS"
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 active_tasks = {}
 
@@ -29,6 +34,28 @@ class NotificationBot(commands.Bot):
         print(f"✅ Sync Slash Commands เข้า Guild ID: {GUILD_ID.id} เรียบร้อยแล้ว!")
 
 bot = NotificationBot()
+
+# ----------------------------------------------------
+# ฟังก์ชันเรียก AI ให้ช่วย Roast / ตอบกลับกวนๆ
+# ----------------------------------------------------
+async def generate_ai_roast(user_message: str, author_name: str) -> str:
+    """ฟังก์ชันส่งข้อความไปให้ AI ช่วยคิดคำแซวกวนๆ"""
+    prompt = f"""
+    คุณเป็นบอทดิสคอร์ดสไตล์กวนประสาท ประชดประชันแบบขำๆ (Roast) 
+    ผู้ใช้ชื่อ "{author_name}" พิมพ์ข้อความว่า: "{user_message}"
+    
+    ช่วยคิดคำตอบกลับแบบกวนๆ ตลกๆ หรือแซวให้เขาไปทำงาน/เร่งงาน 1 สั้นๆ (ไม่เกิน 2-3 ประโยค)
+    ห้ามใช้คำหยาบคายรุนแรง ให้เน้นความประชดกวนๆ ฮาๆ และใช้วาจาไม่ซ้ำใคร
+    """
+    try:
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
+        return "รีบไปปั่นงานได้แล้ว มัวแต่พิมพ์เล่นอยู่ได้! ⏳"
 
 # ----------------------------------------------------
 # ฟังก์ชันสร้างรูปภาพ Countdown
@@ -65,7 +92,7 @@ class RenameImageModal(discord.ui.Modal):
 
         name_only, ext = os.path.splitext(old_filename)
         self.new_name_input = discord.ui.TextInput(
-            label='ชื่อไฟล์ใหม่ (ไม่ต้องใส่ นามสกุล .jpg/.png)',
+            label='ชื่อไฟล์ใหม่ (ไม่ต้องใส่นามสกุล .jpg/.png)',
             placeholder='เช่น meme_cat_1',
             default=name_only,
             required=True
@@ -286,15 +313,35 @@ class ImageSelectView(discord.ui.View):
         await interaction.response.send_message("⚡ **เลือกกำหนดส่งงานด่วน (คลิกที่ปุ่มได้เลย):**", view=buttons_view, ephemeral=True)
 
 # ----------------------------------------------------
+# Event ตอบกลับข้อความในแชทด้วย AI (เมื่อมีการแท็กหรือสุ่มตอบ)
+# ----------------------------------------------------
+@bot.event
+async def on_message(message: discord.Message):
+    # ป้องกันไม่ให้บอทตอบตัวเอง หรือตอบบอทตัวอื่น
+    if message.author.bot:
+        return
+
+    # ตอบกลับทันทีเมื่อมีคนแท็กหาบอท (@บอท) หรือมีโอกาส 30% ในการสุ่มตอบข้อความทั่วไป
+    if bot.user.mentioned_in(message) or random.random() < 0.3:
+        # ลบข้อความแท็กออก เหลือเฉพาะเนื้อหาที่ผู้ใช้พิมพ์
+        clean_content = message.content.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
+        
+        async with message.channel.typing():
+            roast_text = await generate_ai_roast(clean_content if clean_content else message.content, message.author.display_name)
+            await message.reply(f"{message.author.mention} {roast_text}")
+
+    # สำคัญ! ต้องมีบรรทัดนี้เพื่อให้ Slash Commands (/help, /task) ยังคงทำงานได้ปกติ
+    await bot.process_commands(message)
+
+# ----------------------------------------------------
 # Slash Commands
 # ----------------------------------------------------
 
-# คำสั่ง /help (สามารถแก้ไขข้อความตรงนี้ได้เองตามใจชอบ)
 @bot.tree.command(name="help", description="แสดงคำแนะนำการใช้งานและรายการคำสั่งทั้งหมด")
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📖 คู่มือการใช้งานบอทแจ้งเตือน Deadline Manager",
-        description="ยินดีต้อนรับ! คุณสามารถใช้คำสั่งต่อไปนี้เพื่อจัดการงานและรูปภาพในระบบได้:",
+        description="ยินดีต้อนรับ! คุณสามารถแท็ก `@บอท` เพื่อคุย/ให้บอทแซวได้ หรือใช้คำสั่งต่อไปนี้:",
         color=discord.Color.blue()
     )
     
@@ -320,7 +367,6 @@ async def help_command(interaction: discord.Interaction):
     )
     
     embed.set_footer(text="Deadline Manager Bot • พัฒนาด้วย discord.py")
-    
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="add_photo", description="อัปโหลดรูปภาพใหม่เข้าอัลบั้ม")
@@ -415,59 +461,5 @@ async def on_ready():
     if not reminder_loop.is_running():
         reminder_loop.start()
 
-bot.run('TOKEN')
-
-
-
-
-import os
-import random
-import discord
-from discord.ext import commands
-from google import genai
-
-# ----------------------------------------------------
-# ตั้งค่า Gemini API
-# ----------------------------------------------------
-# นำ API Key ที่ได้จาก Google AI Studio มาวางตรงนี้
-GEMINI_API_KEY = "API KEYS"
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
-
-async def generate_ai_roast(user_message: str, author_name: str) -> str:
-    """ฟังก์ชันส่งข้อความไปให้ AI ช่วยคิดคำแซวกวนๆ"""
-    prompt = f"""
-    คุณเป็นบอทดิสคอร์ดสไตล์กวนประสาท ประชดประชันแบบขำๆ (Roast) 
-    ผู้ใช้ชื่อ "{author_name}" พิมพ์ข้อความว่า: "{user_message}"
-    
-    ช่วยคิดคำตอบกลับแบบกวนๆ ตลกๆ หรือแซวให้เขาไปทำงาน/เร่งงาน 1 สั้นๆ (ไม่เกิน 2-3 ประโยค)
-    ห้ามใช้คำหยาบคายรุนแรง ให้เน้นความประชดกวนๆ ฮาๆ และใช้วาจาไม่ซ้ำใคร
-    """
-    try:
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        return response.text.strip()
-    except Exception as e:
-        print(f"Gemini API Error: {e}")
-        # สำรองกรณี API มีปัญหา
-        return "รีบไปปั่นงานได้แล้ว มัวแต่พิมพ์เล่นอยู่ได้! ⏳"
-
-# ----------------------------------------------------
-# Event ตอบกลับข้อความในแชทด้วย AI
-# ----------------------------------------------------
-@bot.event
-async def on_message(message: discord.Message):
-    # ป้องกันไม่ให้บอทตอบตัวเอง หรือตอบบอทตัวอื่น
-    if message.author.bot:
-        return
-
-    # สุ่มโอกาส 30% ที่จะตอบกลับด้วย AI (หรือตั้งเป็น 1.0 ถ้าอยากให้ตอบทุกข้อความ)
-    if random.random() < 0.3:
-        async with message.channel.typing():
-            # ดึงคำตอบจาก AI
-            roast_text = await generate_ai_roast(message.content, message.author.display_name)
-            await message.reply(f"{message.author.mention} {roast_text}")
-
-    # สำคัญ! ต้องมีบรรทัดนี้เพื่อให้ Slash Commands (/help, /task) ยังทำงานได้
-    await bot.process_commands(message)
+# รันบอทดิสคอร์ด
+bot.run('BOT TOKEN')
