@@ -11,7 +11,6 @@ from PIL import Image, ImageDraw, ImageFont
 # ----------------------------------------------------
 # การตั้งค่าเบื้องต้น & ไฟล์เก็บข้อมูล
 # ----------------------------------------------------
-GUILD_ID = discord.Object(id=1128309281427562516) # Server ID ของคุณ
 ALBUM_DIR = "album"
 ROAST_FILE = "roast_list.json"
 os.makedirs(ALBUM_DIR, exist_ok=True)
@@ -41,9 +40,9 @@ class NotificationBot(commands.Bot):
         super().__init__(command_prefix='!', intents=intents)
 
     async def setup_hook(self):
-        self.tree.copy_global_to(guild=GUILD_ID)
-        await self.tree.sync(guild=GUILD_ID)
-        print(f"✅ Sync Slash Commands เข้า Guild ID: {GUILD_ID.id} เรียบร้อยแล้ว!")
+        # Sync แบบ Global เพื่อให้คำสั่ง Slash Commands ไปปรากฏในทุก Server ที่บอทอยู่
+        synced = await self.tree.sync()
+        print(f"✅ Sync Slash Commands แบบ Global ทั้งหมด {len(synced)} คำสั่ง เรียบร้อยแล้ว!")
 
 bot = NotificationBot()
 
@@ -77,7 +76,7 @@ def generate_countdown_image(image_path: str, remaining_time_str: str) -> io.Byt
 # ----------------------------------------------------
 class RenameImageModal(discord.ui.Modal):
     def __init__(self, old_filename: str):
-        super().__init__(title=f'✏️ เปลี่ยนชื่อรูปภาพ')
+        super().__init__(title='✏️ เปลี่ยนชื่อรูปภาพ')
         self.old_filename = old_filename
         name_only, ext = os.path.splitext(old_filename)
         self.new_name_input = discord.ui.TextInput(
@@ -275,7 +274,7 @@ async def on_message(message: discord.Message):
         return
 
     # ถ้ามีการแท็กหาบอท หรือสุ่มโอกาส 30% ให้สุ่มหยิบคำด่าจากลิสต์ไปด่า
-    if bot.user.mentioned_in(message) or random.random() < 0.3:
+    if bot.user.mentioned_in(message) or random.random() < 0.9:
         if roast_words:
             random_roast = random.choice(roast_words)
             await message.reply(f"{message.author.mention} {random_roast}")
@@ -289,7 +288,6 @@ async def on_message(message: discord.Message):
 @bot.tree.command(name="add_roast", description="เพิ่มคำด่าใหม่เข้าคลัง (ใช้ / แยกหลายคำได้ เช่น ไก่/สาว)")
 @app_commands.describe(text="พิมพ์คำหรือประโยคที่ต้องการเพิ่ม (ใช้ / แยกคำได้หลายคำ)")
 async def add_roast(interaction: discord.Interaction, text: str):
-    # คั่นคำด้วยเครื่องหมาย /
     new_items = [item.strip() for item in text.split('/') if item.strip()]
     
     if not new_items:
@@ -316,10 +314,8 @@ async def list_roast(interaction: discord.Interaction):
         await interaction.response.send_message("❌ **ขณะนี้คลังคำด่ายังว่างเปล่า!** ใช้ `/add_roast` เพื่อเพิ่มคำได้", ephemeral=True)
         return
 
-    # แสดงผลรายการพร้อมลำดับตัวเลข
     formatted_list = "\n".join([f"**{i+1}.** {word}" for i, word in enumerate(roast_words)])
     
-    # หากข้อความยาวเกิน limit ของ Discord (2000 ตัวอักษร)
     if len(formatted_list) > 3900:
         formatted_list = formatted_list[:3900] + "\n... (รายการยาวเกินไป)"
 
@@ -362,24 +358,36 @@ async def delete_roast(interaction: discord.Interaction, index: int):
     )
 
 # ----------------------------------------------------
-# Slash Commands เดิมของบอท
+# Slash Commands แจ้งเตือน & อัลบั้ม
 # ----------------------------------------------------
 
 @bot.tree.command(name="help", description="แสดงคำแนะนำการใช้งานและรายการคำสั่งทั้งหมด")
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="📖 คู่มือการใช้งานบอท Deadline Manager",
-        description="รายการคำสั่งทั้งหมดในระบบ:",
+        title="📖 คู่มือการใช้งานบอท Deadline Manager & Roast Bot",
+        description="พิมพ์คำสั่ง Slash Command (`/`) ด้านล่างนี้เพื่อจัดการงานและระบบคลังคำด่า:",
         color=discord.Color.blue()
     )
-    embed.add_field(name="➕ `/add_roast [ข้อความ]`", value="เพิ่มคำด่าเข้าคลัง (ใช้ `/` แยกคำ เช่น `ไก่/สาว/ทำงานได้แล้ว`)", inline=False)
-    embed.add_field(name="📜 `/list_roast`", value="ดูรายการคำด่าและลำดับเลขทั้งหมดที่มีอยู่", inline=False)
-    embed.add_field(name="✏️ `/edit_roast [ลำดับ] [ข้อความใหม่]`", value="แก้ไขข้อความตามลำดับเลข", inline=False)
-    embed.add_field(name="🗑️ `/delete_roast [ลำดับ]`", value="ลบข้อความตามลำดับเลข", inline=False)
-    embed.add_field(name="📌 `/task`", value="ตั้งค่าการแจ้งเตือนงาน", inline=False)
-    embed.add_field(name="📤 `/add_photo`", value="อัปโหลดรูปภาพเข้าอัลบั้ม", inline=False)
-    embed.add_field(name="🖼️ `/manage_album`", value="ระบบจัดการรูปภาพ", inline=False)
-    
+    embed.add_field(
+        name="⏳ **ระบบแจ้งเตือน Deadline & อัลบั้ม**",
+        value=(
+            "• `/task` - ตั้งค่าการแจ้งเตือนงานใหม่ (เลือกรูปภาพ วัน เวลา และความถี่)\n"
+            "• `/add_photo` - อัปโหลดรูปภาพใหม่เข้าอัลบั้ม\n"
+            "• `/manage_album` - เปิดเมนู GUI จัดการรูปภาพ (ดูรูป / เปลี่ยนชื่อ / ลบรูป)"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🔥 **ระบบคลังคำด่า (Roast System)**",
+        value=(
+            "• `/add_roast [ข้อความ]` - เพิ่มคำด่าเข้าคลัง (ใช้ `/` แยกคำ เช่น `ไก่/สาว/ไปทำงาน`)\n"
+            "• `/list_roast` - ดูรายการคำด่าทั้งหมดในคลังพร้อมหมายเลขอ้างอิง\n"
+            "• `/edit_roast [ลำดับ] [ข้อความใหม่]` - แก้ไขข้อความตามลำดับเลข\n"
+            "• `/delete_roast [ลำดับ]` - ลบข้อความออกจากคลังตามลำดับเลข"
+        ),
+        inline=False
+    )
+    embed.set_footer(text="Deadline Manager Bot • พิมพ์ / ตามด้วยชื่อคำสั่งเพื่อเริ่มต้นใช้งาน")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="add_photo", description="อัปโหลดรูปภาพใหม่เข้าอัลบั้ม")
@@ -458,4 +466,6 @@ async def on_ready():
     if not reminder_loop.is_running():
         reminder_loop.start()
 
-bot.run('Discord Token')                             #Pit your DISCORD TOKEN HERE 
+# แนะนำให้ดึง Token ผ่าน Environment Variable หรือระบุ Token ที่ต้องการ
+TOKEN = os.getenv("DISCORD_TOKEN", "PASTE YOUR BOT TOKEN HERE")                        #PASTE YO BOT TOKEN HERE
+bot.run(TOKEN)
